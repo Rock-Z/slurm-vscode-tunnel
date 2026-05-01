@@ -83,6 +83,11 @@ def main() -> int:
         default=str(default_config_path()),
         help="Path to the TOML config file.",
     )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write session files and show the sbatch command without submitting.",
+    )
     args = ap.parse_args()
 
     config_path = pathlib.Path(args.config).resolve()
@@ -138,20 +143,23 @@ def main() -> int:
     }
     dump_json(meta_json, meta)
 
-    proc = subprocess.run(
-        sbatch_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if proc.returncode != 0:
-        die(f"sbatch failed:\n{proc.stderr.strip() or proc.stdout.strip()}")
+    if args.dry_run:
+        job_id = "DRY-RUN"
+    else:
+        proc = subprocess.run(
+            sbatch_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if proc.returncode != 0:
+            die(f"sbatch failed:\n{proc.stderr.strip() or proc.stdout.strip()}")
 
-    raw_job = proc.stdout.strip()
-    job_id = raw_job.split(";", 1)[0]
+        raw_job = proc.stdout.strip()
+        job_id = raw_job.split(";", 1)[0]
     meta["job_id"] = job_id
     dump_json(meta_json, meta)
 
@@ -159,26 +167,30 @@ def main() -> int:
     profile_link = state_dir / f"current-{profile_name}"
     relative_target = pathlib.Path("..") / "logs" / session_id
 
-    for link in (current_link, profile_link):
-        if link.exists() or link.is_symlink():
-            link.unlink()
-        link.symlink_to(relative_target)
+    if not args.dry_run:
+        for link in (current_link, profile_link):
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(relative_target)
 
-    here = pathlib.Path(__file__).resolve().parent
-    status_py = here / "codeserver_status.py"
-
-    print(f"started session: {session_id}")
+    print(f"{'would start' if args.dry_run else 'started'} session: {session_id}")
     print(f"profile:         {profile_name}")
     print(f"job id:          {job_id}")
     print(f"run log:         {run_log}")
     print(f"tunnel log:      {tunnel_log}")
+    if args.dry_run:
+        print(f"sbatch command:  {shlex.join(sbatch_cmd)}")
     print()
     print("status:")
-    print(f"  python3 {status_py}")
-    print(f"  python3 {status_py} {profile_name}")
-    print(f"  python3 {status_py} {session_id}")
+    print("  cs status")
+    print(f"  cs status {profile_name}")
+    print(f"  cs status {session_id}")
+    if not args.dry_run:
+        print(f"  cs status {job_id}")
     print("stop:")
-    print(f"  python3 {here / 'codeserver_stop.py'} {session_id}")
+    print(f"  cs stop {session_id}")
+    if not args.dry_run:
+        print(f"  cs stop {job_id}")
     return 0
 
 

@@ -279,6 +279,11 @@ def build_parser() -> argparse.ArgumentParser:
     submit = subparsers.add_parser("submit", aliases=["s"], help="Submit a new tunnel session.")
     add_config_arg(submit, default=argparse.SUPPRESS)
     submit.add_argument("profile", nargs="?", help="Profile from codeserver.toml.")
+    submit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write session files and show the sbatch command without submitting.",
+    )
 
     status = subparsers.add_parser("status", aliases=["stat", "i"], help="Show session status.")
     add_config_arg(status, default=argparse.SUPPRESS)
@@ -307,10 +312,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def legacy_args(base: List[str], config: str, value: Optional[str]) -> List[str]:
+def legacy_args(
+    base: List[str], config: str, value: Optional[str], *, dry_run: bool = False
+) -> List[str]:
     out = list(base)
     if value:
         out.append(value)
+    if dry_run:
+        out.append("--dry-run")
     out.extend(["--config", config])
     return out
 
@@ -329,7 +338,7 @@ def main() -> int:
         return call_legacy_main(
             codeserver_submit,
             "cs submit",
-            legacy_args([], args.config, args.profile),
+            legacy_args([], args.config, args.profile, dry_run=args.dry_run),
         )
     if command in ("status", "stat", "i"):
         return call_legacy_main(
