@@ -1,0 +1,7 @@
+[project]
+name = "codeserver"
+version = "0.1.0"
+description = "Slurm-backed VS Code tunnel helpers"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []

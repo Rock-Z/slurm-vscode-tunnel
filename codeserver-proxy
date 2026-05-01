@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# codeserver-proxy: attach STDIN/STDOUT to the SSH port (22) of the node running a Slurm job.
+# Usage: codeserver-proxy [JOB_NAME]
+# Default JOB_NAME is "codeserver".
+set -euo pipefail
+
+job="${1:-codeserver}"
+
+# Ensure Slurm tools exist
+for cmd in squeue scontrol; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "error: $cmd not found on this host" >&2; exit 127; }
+done
+
+# Find the first running node for the job
+nl=$(squeue -h -u "$USER" -n "$job" -t RUNNING -o %N | head -n1 || true)
+if [ -z "$nl" ]; then
+  echo "no running allocation found for job name: $job" >&2
+  exit 127
+fi
+
+# Expand NodeList (e.g., r817u09n[01-04]) and pick the first hostname
+node=$(scontrol show hostnames "$nl" | head -n1 || true)
+if [ -z "$node" ]; then
+  echo "failed to resolve hostname from NodeList: $nl" >&2
+  exit 127
+fi
+
+# Relay to the target node's SSH port. Prefer nc, then socat, then ssh -W localhost.
+if command -v nc >/dev/null 2>&1; then
+  exec nc "$node" 22
+elif command -v socat >/dev/null 2>&1; then
+  exec socat - TCP:"$node":22
+else
+  # Fallback: use OpenSSH's stdio-to-socket relay via a local SSH hop
+  # Requires that SSH to localhost works using your forwarded agent.
+  exec ssh -o BatchMode=yes -W "$node:22" localhost
+fi
+
