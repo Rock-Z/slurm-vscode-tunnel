@@ -1,8 +1,7 @@
-Code Server Slurm Helpers
-=========================
+Slurm VS Code Tunnel
+=====================
 
-This folder contains helper scripts for running `code tunnel` inside a Slurm
-allocation and inspecting or stopping that session from the login node.
+`slurm-vscode-tunnel` is a small Python CLI for running VS Code `code tunnel` inside Slurm allocations. It submits CPU or GPU tunnel jobs, persists session metadata and logs, detects device-login prompts, reports Slurm state, cancels sessions, and can proxy SSH to the allocated compute node.
 
 Layout
 ------
