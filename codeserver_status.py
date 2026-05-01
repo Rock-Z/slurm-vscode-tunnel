@@ -12,9 +12,9 @@ from codeserver_lib import (
     load_config,
     load_json,
     query_job_status,
-    resolve_session_dir,
     tail_lines,
 )
+from codeserver_relay import format_duration, is_chain_dir, resolve_chain_or_session_dir
 
 
 def print_block(title: str, block: str) -> None:
@@ -23,35 +23,7 @@ def print_block(title: str, block: str) -> None:
     print(block)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Show session status for the latest session, a profile, or a session id.",
-    )
-    ap.add_argument(
-        "target",
-        nargs="?",
-        default="latest",
-        help="One of: latest, a profile name, or a session id.",
-    )
-    ap.add_argument(
-        "--config",
-        default=str(default_config_path()),
-        help="Path to the TOML config file.",
-    )
-    args = ap.parse_args()
-
-    try:
-        cfg = load_config(pathlib.Path(args.config).resolve())
-    except (ConfigError, FileNotFoundError, tomllib.TOMLDecodeError) as exc:
-        die(f"{exc}. Use --help for usage.", code=2)
-    try:
-        session_dir = resolve_session_dir(cfg, args.target)
-    except FileNotFoundError as exc:
-        die(f"{exc}. Use --help for usage.")
-
-    if not session_dir.exists():
-        die(f"no session found for '{args.target}'. Use --help for usage.")
-
+def print_session(session_dir: pathlib.Path) -> int:
     meta_path = session_dir / "meta.json"
     if not meta_path.exists():
         die(f"missing metadata: {meta_path}")
@@ -76,16 +48,11 @@ def main() -> int:
         print("job status:  unknown")
 
     auth_found = False
-
-    run_auth = find_auth_block(run_log)
-    if run_auth:
-        print_block("auth prompt from run.log", run_auth)
-        auth_found = True
-
-    tunnel_auth = find_auth_block(tunnel_log)
-    if tunnel_auth:
-        print_block("auth prompt from tunnel.log", tunnel_auth)
-        auth_found = True
+    for title, path in (("auth prompt from run.log", run_log), ("auth prompt from tunnel.log", tunnel_log)):
+        block = find_auth_block(path)
+        if block:
+            print_block(title, block)
+            auth_found = True
 
     print()
     print(f"NEEDS_REAUTH={'yes' if auth_found else 'no'}")
@@ -99,8 +66,72 @@ def main() -> int:
         print("===== recent tunnel.log =====")
         for line in tail_lines(tunnel_log, 40):
             print(line)
-
     return 0
+
+
+def print_chain(chain_dir: pathlib.Path) -> int:
+    chain_path = chain_dir / "chain.json"
+    chain = load_json(chain_path)
+    print(f"relay chain: {chain['chain_id']}")
+    print(f"profile:     {chain['profile']}")
+    print(f"chain dir:   {chain_dir}")
+    print(f"config:      {chain['config_path']}")
+    print(f"requested:   {format_duration(int(chain['requested_time_seconds']))}")
+    print(f"limit:       {format_duration(int(chain['profile_max_seconds']))}")
+    print(f"overlap:     {format_duration(int(chain['relay_overlap_seconds']))}")
+    print(f"segments:    {len(chain.get('jobs', []))}")
+    print()
+    print("IDX  JOB_ID       STATE     BEGIN       DURATION  PREV_JOB    LOG")
+    for job in chain.get("jobs", []):
+        job_id = str(job.get("job_id") or "-")
+        status = query_job_status(job_id) if job_id and not job_id.startswith("DRY-RUN") else None
+        state = "unknown"
+        if status:
+            for field in status.split():
+                if field.startswith("state="):
+                    state = field.split("=", 1)[1]
+                    break
+        begin = format_duration(int(job.get("begin_offset_seconds", 0)))
+        duration = format_duration(int(job.get("duration_seconds", 0)))
+        prev = str(job.get("previous_job_id") or "-")
+        print(
+            f"{int(job['index']):<4} {job_id:<12} {state:<9} {begin:<11} "
+            f"{duration:<9} {prev:<11} {job.get('run_log', '-') }"
+        )
+
+    auth_found = False
+    for job in chain.get("jobs", []):
+        for log_key in ("run_log", "tunnel_log"):
+            path = pathlib.Path(job[log_key])
+            block = find_auth_block(path)
+            if block:
+                print_block(f"auth prompt from job-{int(job['index']):03d}/{log_key}", block)
+                auth_found = True
+    print()
+    print(f"NEEDS_REAUTH={'yes' if auth_found else 'no'}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Show session status for latest, a profile, session id, chain id, or job id.")
+    ap.add_argument("target", nargs="?", default="latest", help="latest, profile name, session id, chain id, or job id.")
+    ap.add_argument("--config", default=str(default_config_path()), help="Path to the TOML config file.")
+    args = ap.parse_args()
+
+    try:
+        cfg = load_config(pathlib.Path(args.config).resolve())
+    except (ConfigError, FileNotFoundError, tomllib.TOMLDecodeError) as exc:
+        die(f"{exc}. Use --help for usage.", code=2)
+    try:
+        session_dir = resolve_chain_or_session_dir(cfg, args.target)
+    except FileNotFoundError as exc:
+        die(f"{exc}. Use --help for usage.")
+
+    if not session_dir.exists():
+        die(f"no session found for '{args.target}'. Use --help for usage.")
+    if is_chain_dir(session_dir):
+        return print_chain(session_dir)
+    return print_session(session_dir)
 
 
 if __name__ == "__main__":

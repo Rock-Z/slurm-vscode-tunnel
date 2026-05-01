@@ -201,7 +201,17 @@ def load_config(config_path: pathlib.Path) -> Dict[str, Any]:
                 prof.get("pre_commands", []), f"profiles.{name}.pre_commands"
             ),
             "env": ensure_str_dict(prof.get("env", {}), f"profiles.{name}.env"),
+            "max_time": prof.get("max_time"),
+            "default_time": prof.get("default_time"),
+            "relay_overlap": prof.get("relay_overlap"),
+            "relay_ready_timeout": prof.get("relay_ready_timeout"),
+            "relay_enabled": ensure_bool(
+                prof.get("relay_enabled", True), f"profiles.{name}.relay_enabled"
+            ),
         }
+        for key in ("max_time", "default_time", "relay_overlap", "relay_ready_timeout"):
+            if profiles[name][key] is not None:
+                ensure_string(profiles[name][key], f"profiles.{name}.{key}")
 
     if cfg["default_profile"] not in profiles:
         raise ConfigError("default_profile is not present in profiles")
