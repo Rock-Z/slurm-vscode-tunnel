@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import datetime as dt
 import pathlib
 import tomllib
 from typing import Optional
@@ -11,8 +12,8 @@ from codeserver_lib import (
     find_auth_block,
     load_config,
     load_json,
-    query_job_status,
     resolve_session_dir,
+    run_capture,
     tail_lines,
 )
 
@@ -21,6 +22,126 @@ def print_block(title: str, block: str) -> None:
     print()
     print(f"===== {title} =====")
     print(block)
+
+
+def parse_slurm_duration(value: str) -> Optional[int]:
+    raw = value.strip()
+    if not raw or raw in {"INVALID", "N/A", "NOT_SET", "UNLIMITED"}:
+        return None
+
+    days = 0
+    if "-" in raw:
+        day_text, raw = raw.split("-", 1)
+        if not day_text.isdigit():
+            return None
+        days = int(day_text)
+
+    parts = raw.split(":")
+    if not all(part.isdigit() for part in parts):
+        return None
+
+    nums = [int(part) for part in parts]
+    if len(nums) == 2:
+        hours = 0
+        minutes, seconds = nums
+    elif len(nums) == 3:
+        hours, minutes, seconds = nums
+    else:
+        return None
+
+    if minutes >= 60 or seconds >= 60:
+        return None
+    return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
+
+
+def format_duration(seconds: int) -> str:
+    if seconds < 0:
+        seconds = 0
+    hours, rem = divmod(seconds, 60 * 60)
+    minutes, _ = divmod(rem, 60)
+
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}min")
+    return " ".join(parts)
+
+
+def parse_slurm_start(value: str) -> Optional[dt.datetime]:
+    raw = value.strip()
+    if not raw or raw in {"N/A", "Unknown"}:
+        return None
+    try:
+        return dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def format_pending_reason(value: str) -> str:
+    raw = value.strip() or "unknown"
+    raw = raw.strip("()").upper()
+    return f"({raw})"
+
+
+def capture_status_cmd(argv: list[str]) -> tuple[int, str, str]:
+    try:
+        return run_capture(argv)
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def query_status_line(job_id: Optional[str]) -> str:
+    if not job_id:
+        return "unknown"
+
+    rc, out, _ = capture_status_cmd(["squeue", "-h", "-j", job_id, "-o", "%T|%R|%S|%M|%l"])
+    if rc == 0 and out.strip():
+        state, reason, start_text, elapsed_text, limit_text = (
+            out.splitlines()[0].split("|", 4)
+        )
+        state = state.strip()
+        if state == "PENDING":
+            start = parse_slurm_start(start_text)
+            if start is not None:
+                remaining = int((start - dt.datetime.now(start.tzinfo)).total_seconds())
+                if remaining > 0 and remaining % 60:
+                    remaining += 60 - (remaining % 60)
+                return (
+                    f"{state}, reason: {format_pending_reason(reason)}, "
+                    f"{format_duration(remaining)} until start"
+                )
+            return f"{state}, reason: {format_pending_reason(reason)}"
+
+        elapsed = parse_slurm_duration(elapsed_text)
+        limit = parse_slurm_duration(limit_text)
+        if state == "RUNNING" and elapsed is not None and limit is not None:
+            return f"{state} {format_duration(elapsed)}/{format_duration(limit)}"
+        return state or "unknown"
+
+    rc, out, _ = capture_status_cmd(
+        [
+            "sacct",
+            "-n",
+            "-P",
+            "-j",
+            job_id,
+            "--format=JobIDRaw,State,Elapsed,Timelimit",
+        ]
+    )
+    if rc == 0 and out.strip():
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 4 or parts[0] != job_id:
+                continue
+            state, elapsed_text, limit_text = parts[1], parts[2], parts[3]
+            elapsed = parse_slurm_duration(elapsed_text)
+            limit = parse_slurm_duration(limit_text)
+            if state == "RUNNING" and elapsed is not None and limit is not None:
+                return f"{state} {format_duration(elapsed)}/{format_duration(limit)}"
+            return state or "unknown"
+
+    return "unknown"
 
 
 def main() -> int:
@@ -50,6 +171,10 @@ def main() -> int:
         die(f"{exc}. Use --help for usage.")
 
     if not session_dir.exists():
+        if args.target.isdigit():
+            print(f"job id:      {args.target}")
+            print(f"status:      {query_status_line(args.target)}")
+            return 0
         die(f"no session found for '{args.target}'. Use --help for usage.")
 
     meta_path = session_dir / "meta.json"
@@ -62,18 +187,12 @@ def main() -> int:
     job_id: Optional[str] = meta.get("job_id")
 
     print(f"session:     {meta['session_id']}")
+    print(f"status:      {query_status_line(job_id)}")
     print(f"profile:     {meta['profile']}")
-    print(f"session dir: {session_dir}")
-    print(f"config:      {meta['config_path']}")
-    print(f"job id:      {job_id or '-'}")
     print(f"run log:     {run_log}")
     print(f"tunnel log:  {tunnel_log}")
-
-    if job_id:
-        status = query_job_status(job_id)
-        print(f"job status:  {status or 'unknown'}")
-    else:
-        print("job status:  unknown")
+    print(f"config:      {meta['config_path']}")
+    print(f"job id:      {job_id or '-'}")
 
     auth_found = False
 
