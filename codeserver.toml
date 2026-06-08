@@ -21,10 +21,7 @@ sbatch_args = [
   "--partition=day",
   "--job-name=codeserver-cpu",
 ]
-pre_commands = [
-  "source /etc/profile.d/modules.sh",
-  "module load VSCode/1.102.3",
-]
+pre_commands = []
 
 [profiles.gpu]
 enabled = true
@@ -41,10 +38,7 @@ sbatch_args = [
   "--gpus=1",
   "--job-name=codeserver-gpu",
 ]
-pre_commands = [
-  "source /etc/profile.d/modules.sh",
-  "module load VSCode/1.102.3",
-]
+pre_commands = []
 
 [profiles.relay_test]
 enabled = true
