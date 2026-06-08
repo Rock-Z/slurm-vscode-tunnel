@@ -10,54 +10,23 @@ from codeserver_lib import (
     default_config_path,
     die,
     find_auth_block,
+    is_chain_dir,
     load_config,
     load_json,
+    parse_slurm_seconds,
     query_job_status,
     resolve_session_dir,
     run_capture,
+    state_from_status,
     tail_lines,
 )
-from codeserver_relay import (
-    format_duration as format_chain_duration,
-    is_chain_dir,
-    resolve_chain_or_session_dir,
-)
+from codeserver_relay import format_duration as format_chain_duration
 
 
 def print_block(title: str, block: str) -> None:
     print()
     print(f"===== {title} =====")
     print(block)
-
-
-def parse_slurm_duration(value: str) -> Optional[int]:
-    raw = value.strip()
-    if not raw or raw in {"INVALID", "N/A", "NOT_SET", "UNLIMITED"}:
-        return None
-
-    days = 0
-    if "-" in raw:
-        day_text, raw = raw.split("-", 1)
-        if not day_text.isdigit():
-            return None
-        days = int(day_text)
-
-    parts = raw.split(":")
-    if not all(part.isdigit() for part in parts):
-        return None
-
-    nums = [int(part) for part in parts]
-    if len(nums) == 2:
-        hours = 0
-        minutes, seconds = nums
-    elif len(nums) == 3:
-        hours, minutes, seconds = nums
-    else:
-        return None
-
-    if minutes >= 60 or seconds >= 60:
-        return None
-    return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
 
 
 def format_duration(seconds: int) -> str:
@@ -119,8 +88,8 @@ def query_status_line(job_id: Optional[str]) -> str:
                 )
             return f"{state}, reason: {format_pending_reason(reason)}"
 
-        elapsed = parse_slurm_duration(elapsed_text)
-        limit = parse_slurm_duration(limit_text)
+        elapsed = parse_slurm_seconds(elapsed_text)
+        limit = parse_slurm_seconds(limit_text)
         if state == "RUNNING" and elapsed is not None and limit is not None:
             return f"{state} {format_duration(elapsed)}/{format_duration(limit)}"
         return state or "unknown"
@@ -141,8 +110,8 @@ def query_status_line(job_id: Optional[str]) -> str:
             if len(parts) < 4 or parts[0] != job_id:
                 continue
             state, elapsed_text, limit_text = parts[1], parts[2], parts[3]
-            elapsed = parse_slurm_duration(elapsed_text)
-            limit = parse_slurm_duration(limit_text)
+            elapsed = parse_slurm_seconds(elapsed_text)
+            limit = parse_slurm_seconds(limit_text)
             if state == "RUNNING" and elapsed is not None and limit is not None:
                 return f"{state} {format_duration(elapsed)}/{format_duration(limit)}"
             return state or "unknown"
@@ -206,12 +175,7 @@ def print_chain(chain_dir: pathlib.Path) -> int:
     for job in chain.get("jobs", []):
         job_id = str(job.get("job_id") or "-")
         status = query_job_status(job_id) if job_id and not job_id.startswith("DRY-RUN") else None
-        state = "unknown"
-        if status:
-            for field in status.split():
-                if field.startswith("state="):
-                    state = field.split("=", 1)[1]
-                    break
+        state = state_from_status(status)
         begin = format_chain_duration(int(job.get("begin_offset_seconds", 0)))
         duration = format_chain_duration(int(job.get("duration_seconds", 0)))
         prev = str(job.get("previous_job_id") or "-")
@@ -244,7 +208,7 @@ def main() -> int:
     except (ConfigError, FileNotFoundError, tomllib.TOMLDecodeError) as exc:
         die(f"{exc}. Use --help for usage.", code=2)
     try:
-        session_dir = resolve_chain_or_session_dir(cfg, args.target)
+        session_dir = resolve_session_dir(cfg, args.target)
     except FileNotFoundError as exc:
         die(f"{exc}. Use --help for usage.")
 

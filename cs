@@ -20,12 +20,13 @@ from codeserver_lib import (
     expand_path,
     load_config,
     load_json,
+    parse_slurm_seconds,
     profile_names,
     query_job_status,
     resolve_session_dir,
     run_capture,
+    state_from_status,
 )
-from codeserver_relay import format_duration
 
 
 TOP_HELP = """usage: cs [command] [options] [target]
@@ -94,15 +95,6 @@ def call_legacy_main(module: Any, prog: str, args: List[str]) -> int:
         sys.argv = old_argv
 
 
-def status_from_text(status: Optional[str]) -> str:
-    if not status:
-        return "unknown"
-    for field in status.split():
-        if field.startswith("state="):
-            return field.removeprefix("state=")
-    return "unknown"
-
-
 def is_active_state(state: str) -> bool:
     return state.upper() in ACTIVE_STATES
 
@@ -112,7 +104,7 @@ def chain_state(chain: Dict[str, Any]) -> str:
     for job in chain.get("jobs", []):
         job_id = str(job.get("job_id") or "")
         status = query_job_status(job_id) if job_id and not job_id.startswith("DRY-RUN") else None
-        states.append(status_from_text(status))
+        states.append(state_from_status(status))
     if any(state == "RUNNING" for state in states):
         return "RUNNING"
     if any(state == "PENDING" for state in states):
@@ -138,7 +130,7 @@ def session_rows(cfg: Dict[str, Any], expand: bool = False) -> List[Dict[str, st
             for job in chain.get("jobs", []):
                 job_id = str(job.get("job_id") or "")
                 status = query_job_status(job_id) if job_id and not job_id.startswith("DRY-RUN") else None
-                rows.append({"session": f"  job-{int(job['index']):03d}", "profile": str(chain.get("profile") or "-"), "job": job_id or "-", "state": status_from_text(status), "dir": str(job.get("session_dir") or "-")})
+                rows.append({"session": f"  job-{int(job['index']):03d}", "profile": str(chain.get("profile") or "-"), "job": job_id or "-", "state": state_from_status(status), "dir": str(job.get("session_dir") or "-")})
 
     chain_dirs = {p.parent.resolve() for p in logs_dir.glob("*/chain.json")}
     for meta_path in sorted(logs_dir.glob("*/meta.json"), reverse=True):
@@ -150,7 +142,7 @@ def session_rows(cfg: Dict[str, Any], expand: bool = False) -> List[Dict[str, st
             continue
         job_id = str(meta.get("job_id") or "")
         status = query_job_status(job_id) if job_id and not job_id.startswith("DRY-RUN") else None
-        rows.append({"session": str(meta.get("session_id") or meta_path.parent.name), "profile": str(meta.get("profile") or "-"), "job": job_id or "-", "state": status_from_text(status), "dir": str(meta_path.parent)})
+        rows.append({"session": str(meta.get("session_id") or meta_path.parent.name), "profile": str(meta.get("profile") or "-"), "job": job_id or "-", "state": state_from_status(status), "dir": str(meta_path.parent)})
     return rows
 
 
@@ -300,14 +292,9 @@ def exec_ssh_proxy(node: str) -> None:
     os.execvp("ssh", ["ssh", "-o", "BatchMode=yes", "-W", f"{node}:22", "localhost"])
 
 
-def cmd_proxy(args: argparse.Namespace) -> int:
-    cfg = load_cfg(args.config)
-    node = first_node_for_target(cfg, args.target, command_name=args.command)
-    exec_ssh_proxy(node)
-    return 127
-
-
-def cmd_continue(args: argparse.Namespace) -> int:
+def cmd_connect(args: argparse.Namespace) -> int:
+    # Shared handler for `proxy` and `continue`: both resolve the session node
+    # and hand stdin/stdout to SSH on it.
     cfg = load_cfg(args.config)
     node = first_node_for_target(cfg, args.target, command_name=args.command)
     exec_ssh_proxy(node)
@@ -358,35 +345,6 @@ def parse_duration_seconds(value: str) -> int:
     die("duration must look like 10h, 90m, 1-02:00:00, HH:MM:SS, or minutes", code=2)
 
 
-def parse_slurm_time_seconds(value: str) -> Optional[int]:
-    raw = value.strip()
-    if raw in {"UNLIMITED", "NOT_SET", "INVALID"}:
-        return None
-
-    day_part = 0
-    if "-" in raw:
-        days, raw = raw.split("-", 1)
-        if not days.isdigit():
-            return None
-        day_part = int(days)
-
-    parts = raw.split(":")
-    if not all(part.isdigit() for part in parts):
-        return None
-    nums = [int(part) for part in parts]
-    if len(nums) == 1:
-        hours, minutes, seconds = 0, nums[0], 0
-    elif len(nums) == 2:
-        hours, minutes, seconds = 0, nums[0], nums[1]
-    elif len(nums) == 3:
-        hours, minutes, seconds = nums
-    else:
-        return None
-    if minutes >= 60 or seconds >= 60:
-        return None
-    return (((day_part * 24) + hours) * 60 + minutes) * 60 + seconds
-
-
 def format_slurm_time(seconds: int) -> str:
     days, rem = divmod(seconds, 24 * 60 * 60)
     hours, rem = divmod(rem, 60 * 60)
@@ -414,7 +372,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
         die(f"scontrol show job failed:\n{err.strip() or out.strip()}", code=127)
 
     current_raw = job_field(out, "TimeLimit")
-    current_seconds = parse_slurm_time_seconds(current_raw or "")
+    current_seconds = parse_slurm_seconds(current_raw or "")
     if current_raw is None or current_seconds is None:
         die(f"could not parse current TimeLimit for job {job_id}: {current_raw or 'missing'}")
 
@@ -720,12 +678,10 @@ def main() -> int:
             else:
                 parser.error("extend requires DURATION, for example: cs extend cpu 10h")
         return cmd_extend(args)
-    if command in ("continue", "c"):
-        return cmd_continue(args)
+    if command in ("continue", "c", "proxy", "p"):
+        return cmd_connect(args)
     if command in ("list", "l"):
         return cmd_list(args)
-    if command in ("proxy", "p"):
-        return cmd_proxy(args)
     if command == "profiles":
         return cmd_profiles(args)
     if command == "config":

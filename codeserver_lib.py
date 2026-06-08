@@ -109,6 +109,48 @@ def query_job_status(job_id: str) -> Optional[str]:
     return None
 
 
+def state_from_status(status: Optional[str]) -> str:
+    """Extract the Slurm state from a query_job_status() line ('state=RUNNING ...')."""
+    if not status:
+        return "unknown"
+    for field in status.split():
+        if field.startswith("state="):
+            return field.removeprefix("state=")
+    return "unknown"
+
+
+def parse_slurm_seconds(value: str) -> Optional[int]:
+    """Parse a Slurm duration (Elapsed/TimeLimit) like D-HH:MM:SS, HH:MM:SS,
+    MM:SS, or bare minutes into seconds. Returns None for empty or sentinel
+    values (UNLIMITED, N/A, NOT_SET, ...)."""
+    raw = value.strip()
+    if not raw or raw in {"INVALID", "N/A", "NOT_SET", "UNLIMITED", "Unknown"}:
+        return None
+
+    days = 0
+    if "-" in raw:
+        day_text, raw = raw.split("-", 1)
+        if not day_text.isdigit():
+            return None
+        days = int(day_text)
+
+    parts = raw.split(":")
+    if not all(part.isdigit() for part in parts):
+        return None
+    nums = [int(part) for part in parts]
+    if len(nums) == 1:
+        hours, minutes, seconds = 0, nums[0], 0
+    elif len(nums) == 2:
+        hours, minutes, seconds = 0, nums[0], nums[1]
+    elif len(nums) == 3:
+        hours, minutes, seconds = nums
+    else:
+        return None
+    if minutes >= 60 or seconds >= 60:
+        return None
+    return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
+
+
 def find_auth_block(
     path: pathlib.Path, context_before: int = 4, context_after: int = 12
 ) -> Optional[str]:
@@ -247,7 +289,13 @@ def ensure_root_dirs(cfg: Dict[str, Any]) -> pathlib.Path:
     return root
 
 
+def is_chain_dir(path: pathlib.Path) -> bool:
+    return (path / "chain.json").exists()
+
+
 def resolve_session_dir(cfg: Dict[str, Any], target: str) -> pathlib.Path:
+    """Resolve a target (latest, profile name, session/chain id, or job id) to a
+    session or relay-chain directory."""
     root_dir = expand_path(cfg["root_dir"])
     state_dir = root_dir / "state"
     logs_dir = root_dir / "logs"
@@ -265,6 +313,14 @@ def resolve_session_dir(cfg: Dict[str, Any], target: str) -> pathlib.Path:
         return link.resolve()
 
     if target.isdigit() and logs_dir.exists():
+        for chain_path in sorted(logs_dir.glob("*/chain.json"), reverse=True):
+            try:
+                chain = load_json(chain_path)
+            except (OSError, json.JSONDecodeError):
+                continue
+            for job in chain.get("jobs", []):
+                if str(job.get("job_id", "")) == target:
+                    return chain_path.parent.resolve()
         for meta_path in sorted(logs_dir.glob("*/meta.json"), reverse=True):
             try:
                 meta = load_json(meta_path)

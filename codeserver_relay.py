@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-import json
-import pathlib
 import re
 from typing import Any, Dict, List, Optional
 
-from codeserver_lib import ConfigError, expand_path, load_json
+from codeserver_lib import ConfigError
 
 READY_PATTERNS = [
     re.compile(r"\bREADY\b"),
@@ -131,44 +129,3 @@ def plan_relay(requested: int, max_time: int, overlap: int) -> List[Dict[str, in
         begin += step
         index += 1
     return segments
-
-
-def is_chain_dir(path: pathlib.Path) -> bool:
-    return (path / "chain.json").exists()
-
-
-def resolve_chain_or_session_dir(cfg: Dict[str, Any], target: str) -> pathlib.Path:
-    root_dir = expand_path(cfg["root_dir"])
-    state_dir = root_dir / "state"
-    logs_dir = root_dir / "logs"
-
-    if target == "latest":
-        link = state_dir / "current"
-        if not link.exists():
-            raise FileNotFoundError(f"no current session symlink at {link}")
-        return link.resolve()
-
-    if target in cfg["profiles"]:
-        link = state_dir / f"current-{target}"
-        if not link.exists():
-            raise FileNotFoundError(f"no current session symlink for profile '{target}' at {link}")
-        return link.resolve()
-
-    if target.isdigit() and logs_dir.exists():
-        for chain_path in sorted(logs_dir.glob("*/chain.json"), reverse=True):
-            try:
-                chain = load_json(chain_path)
-            except (OSError, json.JSONDecodeError):
-                continue
-            for job in chain.get("jobs", []):
-                if str(job.get("job_id", "")) == target:
-                    return chain_path.parent.resolve()
-        for meta_path in sorted(logs_dir.glob("*/meta.json"), reverse=True):
-            try:
-                meta = load_json(meta_path)
-            except (OSError, json.JSONDecodeError):
-                continue
-            if str(meta.get("job_id", "")) == target:
-                return meta_path.parent.resolve()
-
-    return (logs_dir / target).resolve()

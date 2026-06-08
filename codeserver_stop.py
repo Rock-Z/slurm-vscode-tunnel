@@ -5,8 +5,15 @@ import subprocess
 import tomllib
 from typing import List
 
-from codeserver_lib import ConfigError, default_config_path, die, load_config, load_json
-from codeserver_relay import is_chain_dir, resolve_chain_or_session_dir
+from codeserver_lib import (
+    ConfigError,
+    default_config_path,
+    die,
+    is_chain_dir,
+    load_config,
+    load_json,
+    resolve_session_dir,
+)
 
 
 def scancel(job_id: str) -> None:
@@ -69,7 +76,7 @@ def main() -> int:
         die(f"{exc}. Use --help for usage.", code=2)
 
     try:
-        session_dir = resolve_chain_or_session_dir(cfg, args.target)
+        session_dir = resolve_session_dir(cfg, args.target)
     except FileNotFoundError as exc:
         die(f"{exc}. Use --help for usage.")
 
