@@ -214,12 +214,27 @@ def squeue_running_nodes(*, user: str, target: str, by_job_id: bool) -> List[str
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def squeue_job_ids(*, user: str, target: str, by_job_id: bool) -> List[str]:
+def squeue_job_matches(*, user: str, target: str, by_job_id: bool) -> List[Dict[str, str]]:
     selector = ["-j", target] if by_job_id else ["-n", target]
-    rc, out, err = run_capture(["squeue", "-h", "-u", user, *selector, "-t", "PENDING,RUNNING", "-o", "%i"])
+    rc, out, err = run_capture(["squeue", "-h", "-u", user, *selector, "-t", "PENDING,RUNNING", "-o", "%i|%T"])
     if rc != 0:
         die(f"squeue failed:\n{err.strip() or out.strip()}", code=127)
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    matches: List[Dict[str, str]] = []
+    for line in out.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        job_id, _, state = raw.partition("|")
+        matches.append({"job_id": job_id.strip(), "state": state.strip().upper()})
+    return matches
+
+
+def preferred_job_id(matches: List[Dict[str, str]]) -> str:
+    for desired_state in ("RUNNING", "PENDING"):
+        for match in matches:
+            if match["state"] == desired_state:
+                return match["job_id"]
+    return matches[0]["job_id"]
 
 
 def resolve_slurm_job_id(cfg: Dict[str, Any], target: Optional[str], *, command_name: str) -> str:
@@ -231,22 +246,24 @@ def resolve_slurm_job_id(cfg: Dict[str, Any], target: Optional[str], *, command_
     job_id = requested if requested.isdigit() else job_id_from_session_target(cfg, target)
 
     if job_id and job_id != "DRY-RUN":
-        matches = squeue_job_ids(user=user, target=job_id, by_job_id=True)
+        matches = squeue_job_matches(user=user, target=job_id, by_job_id=True)
         label = f"job id: {job_id}"
     else:
         job_name = resolve_proxy_job_name(cfg, target)
-        matches = squeue_job_ids(user=user, target=job_name, by_job_id=False)
+        matches = squeue_job_matches(user=user, target=job_name, by_job_id=False)
         label = f"job name: {job_name}"
 
     if not matches:
         die(f"no pending or running allocation found for {label}", code=127)
+    selected = preferred_job_id(matches)
     if len(matches) > 1:
+        summary = ", ".join(f"{match['job_id']}:{match['state']}" for match in matches)
         print(
             f"WARNING: {len(matches)} pending/running allocations match {label}; "
-            f"{command_name} will use only the first one listed: {matches[0]}",
+            f"{command_name} will use {selected}. Matches: {summary}",
             file=sys.stderr,
         )
-    return matches[0]
+    return selected
 
 
 def first_node_for_target(cfg: Dict[str, Any], target: Optional[str], *, command_name: str) -> str:

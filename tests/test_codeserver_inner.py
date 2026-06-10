@@ -4,11 +4,20 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import codeserver_inner
+
+cs_loader = SourceFileLoader("cs", str(ROOT / "cs"))
+cs_spec = spec_from_loader("cs", cs_loader)
+cs = module_from_spec(cs_spec)
+assert cs_spec.loader is not None
+cs_spec.loader.exec_module(cs)
 
 
 class StaleServerCleanupTests(unittest.TestCase):
@@ -66,6 +75,19 @@ class StaleServerCleanupTests(unittest.TestCase):
         )
         # With no known live commit we must not reap anything.
         self.assertFalse(codeserver_inner.is_stale_server_commit(live, set()))
+
+    def test_cleanup_is_suppressed_during_upgrade_grace(self):
+        with mock.patch.object(
+            codeserver_inner, "protected_server_commits"
+        ) as protected:
+            codeserver_inner.cleanup_stale_server_processes(
+                "code",
+                os.environ.copy(),
+                upgrade_grace_until=20.0,
+                now=10.0,
+            )
+
+        protected.assert_not_called()
 
 
 class RespawnSupervisorTests(unittest.TestCase):
@@ -125,6 +147,106 @@ class RespawnSupervisorTests(unittest.TestCase):
         finally:
             codeserver_inner.RESPAWN_RESTART_DELAY_SECONDS = old_delay
             codeserver_inner.TERMINATE_GRACE_SECONDS = old_grace
+
+
+class RelayReadinessTests(unittest.TestCase):
+    def test_parses_connected_code_tunnel_status(self):
+        status = codeserver_inner.parse_tunnel_status(
+            json.dumps(
+                {
+                    "tunnel": {
+                        "name": "misha",
+                        "tunnel": "Connected",
+                        "last_fail_reason": None,
+                    },
+                    "service_installed": False,
+                }
+            )
+        )
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertTrue(status.connected)
+        self.assertIn("name=misha", status.summary)
+        self.assertIn("state=Connected", status.summary)
+
+    def test_parses_disconnected_code_tunnel_status(self):
+        status = codeserver_inner.parse_tunnel_status(
+            json.dumps(
+                {
+                    "tunnel": {
+                        "name": "misha",
+                        "tunnel": "Disconnected",
+                        "last_fail_reason": "network",
+                    }
+                }
+            )
+        )
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertFalse(status.connected)
+        self.assertIn("last_fail_reason=network", status.summary)
+
+    def test_detects_upgrade_hints(self):
+        self.assertTrue(
+            codeserver_inner.has_upgrade_hint(
+                "[rpc.0] Updating CLI to 1.123.0 (commit abc123)"
+            )
+        )
+        self.assertTrue(codeserver_inner.has_upgrade_hint("respawn requested"))
+
+    def test_status_polling_drives_relay_readiness_for_code_jobs(self):
+        old_status_interval = codeserver_inner.TUNNEL_STATUS_CHECK_INTERVAL_SECONDS
+        old_stale_interval = codeserver_inner.STALE_SERVER_CHECK_INTERVAL_SECONDS
+        codeserver_inner.TUNNEL_STATUS_CHECK_INTERVAL_SECONDS = 0.05
+        codeserver_inner.STALE_SERVER_CHECK_INTERVAL_SECONDS = 3600
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = pathlib.Path(tmp)
+                fake_code = tmp_path / "fake-code"
+                fake_code.write_text(
+                    """#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "code 1.123.2 (commit 3c631b164c239e7aeaaae7c626b46c527b361af2)"
+elif [ "$1" = "tunnel" ] && [ "$2" = "status" ]; then
+  echo '{"tunnel":{"name":"misha","tunnel":"Connected","last_fail_reason":null},"service_installed":false}'
+else
+  exit 2
+fi
+""",
+                    encoding="utf-8",
+                )
+                fake_code.chmod(0o755)
+                log = tmp_path / "tunnel.log"
+
+                with mock.patch.object(codeserver_inner, "cancel_previous_job") as cancel:
+                    rc, respawn = codeserver_inner.forward_pty_output(
+                        ["bash", "-lc", "sleep 0.2"],
+                        os.environ.copy(),
+                        log,
+                        "12345",
+                        5,
+                        str(fake_code),
+                    )
+
+                self.assertEqual(rc, 0)
+                self.assertFalse(respawn)
+                cancel.assert_called_once_with("12345")
+        finally:
+            codeserver_inner.TUNNEL_STATUS_CHECK_INTERVAL_SECONDS = old_status_interval
+            codeserver_inner.STALE_SERVER_CHECK_INTERVAL_SECONDS = old_stale_interval
+
+
+class SlurmSelectionTests(unittest.TestCase):
+    def test_prefers_running_job_over_pending_matches(self):
+        matches = [
+            {"job_id": "1993436", "state": "PENDING"},
+            {"job_id": "1993435", "state": "RUNNING"},
+            {"job_id": "1993437", "state": "PENDING"},
+        ]
+
+        self.assertEqual(cs.preferred_job_id(matches), "1993435")
 
 
 if __name__ == "__main__":

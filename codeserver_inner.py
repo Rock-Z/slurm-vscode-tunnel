@@ -5,11 +5,13 @@ import os
 import pathlib
 import pty
 import re
+import select
 import shlex
 import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from typing import Dict, Optional, Set, Tuple
 
 from codeserver_lib import load_config, merged_env
@@ -20,6 +22,21 @@ MAX_RESPAWN_RESTARTS = 3
 RESPAWN_RESTART_DELAY_SECONDS = 5
 TERMINATE_GRACE_SECONDS = 5
 STALE_SERVER_CHECK_INTERVAL_SECONDS = 10
+TUNNEL_STATUS_CHECK_INTERVAL_SECONDS = 5
+TUNNEL_STATUS_TIMEOUT_SECONDS = 10
+UPGRADE_GRACE_SECONDS = 180
+
+UPGRADE_HINT_PATTERNS = [
+    re.compile(r"\bupdat(?:e|ing)\b.*\bCLI\b", re.IGNORECASE),
+    re.compile(r"\bCLI\b.*\bupdat(?:e|ing)\b", re.IGNORECASE),
+    re.compile(r"\brespawn requested\b", re.IGNORECASE),
+]
+
+
+@dataclass(frozen=True)
+class TunnelStatus:
+    connected: bool
+    summary: str
 
 
 def extract_code_commit(version_text: str) -> Optional[str]:
@@ -47,6 +64,55 @@ def current_code_commit(
             sys.stdout.flush()
         return None
     return extract_code_commit(proc.stdout)
+
+
+def parse_tunnel_status(status_text: str) -> Optional[TunnelStatus]:
+    try:
+        raw = json.loads(status_text)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    tunnel = raw.get("tunnel")
+    if not isinstance(tunnel, dict):
+        return None
+
+    state = str(tunnel.get("tunnel") or tunnel.get("state") or "").strip()
+    name = str(tunnel.get("name") or "").strip()
+    reason = str(tunnel.get("last_fail_reason") or "").strip()
+    connected = state.lower() == "connected" or tunnel.get("connected") is True
+
+    pieces = []
+    if name:
+        pieces.append(f"name={name}")
+    if state:
+        pieces.append(f"state={state}")
+    if reason:
+        pieces.append(f"last_fail_reason={reason}")
+    summary = " ".join(pieces) or "status=unknown"
+    return TunnelStatus(connected=connected, summary=summary)
+
+
+def query_tunnel_status(code_bin: str, env: Dict[str, str]) -> Optional[TunnelStatus]:
+    proc = subprocess.run(
+        [code_bin, "tunnel", "status"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        check=False,
+        timeout=TUNNEL_STATUS_TIMEOUT_SECONDS,
+    )
+    if proc.returncode != 0:
+        return None
+    return parse_tunnel_status(proc.stdout)
+
+
+def has_upgrade_hint(text: str) -> bool:
+    return any(pattern.search(text) for pattern in UPGRADE_HINT_PATTERNS)
 
 
 def process_cmdline(pid: int) -> str:
@@ -132,9 +198,17 @@ def is_stale_server_commit(commit: str, protected: Set[str]) -> bool:
 
 
 def cleanup_stale_server_processes(
-    code_bin: Optional[str], env: Dict[str, str]
+    code_bin: Optional[str],
+    env: Dict[str, str],
+    *,
+    upgrade_grace_until: float = 0.0,
+    now: Optional[float] = None,
 ) -> None:
     if not code_bin:
+        return
+    if now is None:
+        now = time.monotonic()
+    if now < upgrade_grace_until:
         return
     protected = protected_server_commits(code_bin, env)
     if not protected:
@@ -232,10 +306,62 @@ def forward_pty_output(
     respawn_requested = False
     deadline = time.monotonic() + max(0, ready_timeout)
     next_stale_check = time.monotonic()
+    next_status_check = time.monotonic()
+    upgrade_grace_until = 0.0
+    protected_snapshot = protected_server_commits(code_bin, env) if code_bin else set()
+    last_status_summary = ""
     buffer = ""
 
     with tunnel_log.open("ab") as logf:
         while True:
+            now = time.monotonic()
+            if code_bin and now >= next_status_check:
+                try:
+                    status = query_tunnel_status(code_bin, env)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    status = None
+                    if last_status_summary != "status query failed":
+                        print(f"[relay] tunnel status query failed: {exc}")
+                        sys.stdout.flush()
+                        last_status_summary = "status query failed"
+                if status and status.summary != last_status_summary:
+                    print(f"[relay] tunnel status: {status.summary}")
+                    sys.stdout.flush()
+                    last_status_summary = status.summary
+                if status and status.connected and not ready:
+                    ready = True
+                    print("[relay] readiness detected from code tunnel status")
+                    sys.stdout.flush()
+
+                current_protected = protected_server_commits(code_bin, env)
+                if protected_snapshot and current_protected - protected_snapshot:
+                    upgrade_grace_until = max(
+                        upgrade_grace_until, now + UPGRADE_GRACE_SECONDS
+                    )
+                    print(
+                        "[codeserver_inner] VS Code server commit changed; "
+                        f"suppressing stale cleanup for {UPGRADE_GRACE_SECONDS}s"
+                    )
+                    sys.stdout.flush()
+                if current_protected:
+                    protected_snapshot = current_protected
+                next_status_check = now + TUNNEL_STATUS_CHECK_INTERVAL_SECONDS
+
+            if now >= next_stale_check:
+                cleanup_stale_server_processes(
+                    code_bin,
+                    env,
+                    upgrade_grace_until=upgrade_grace_until,
+                    now=now,
+                )
+                next_stale_check = now + STALE_SERVER_CHECK_INTERVAL_SECONDS
+
+            ready_fds, _, _ = select.select([master_fd], [], [], 1.0)
+            if not ready_fds:
+                if proc.poll() is not None:
+                    break
+                continue
+
             try:
                 chunk = os.read(master_fd, 4096)
             except OSError:
@@ -249,15 +375,24 @@ def forward_pty_output(
 
             text = chunk.decode("utf-8", errors="replace")
             buffer = (buffer + text)[-8000:]
-            now = time.monotonic()
-            if now >= next_stale_check:
-                cleanup_stale_server_processes(code_bin, env)
-                next_stale_check = now + STALE_SERVER_CHECK_INTERVAL_SECONDS
-            if not ready and any(pattern.search(buffer) for pattern in READY_PATTERNS):
+            if code_bin and has_upgrade_hint(text):
+                upgrade_grace_until = max(
+                    upgrade_grace_until, time.monotonic() + UPGRADE_GRACE_SECONDS
+                )
+                print(
+                    "[codeserver_inner] VS Code CLI upgrade activity detected; "
+                    f"suppressing stale cleanup for {UPGRADE_GRACE_SECONDS}s"
+                )
+                sys.stdout.flush()
+            if (
+                not code_bin
+                and not ready
+                and any(pattern.search(buffer) for pattern in READY_PATTERNS)
+            ):
                 ready = True
                 print("[relay] readiness detected")
                 sys.stdout.flush()
-            if "respawn requested" in buffer.lower():
+            if re.search(r"\brespawn requested\b", buffer, re.IGNORECASE):
                 respawn_requested = True
                 msg = (
                     "[codeserver_inner] VS Code CLI requested respawn; "
