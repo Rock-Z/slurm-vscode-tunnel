@@ -332,6 +332,9 @@ def forward_pty_output(
                     ready = True
                     print("[relay] readiness detected from code tunnel status")
                     sys.stdout.flush()
+                if previous_job_id and ready and not previous_canceled:
+                    cancel_previous_job(previous_job_id)
+                    previous_canceled = True
 
                 current_protected = protected_server_commits(code_bin, env)
                 if protected_snapshot and current_protected - protected_snapshot:
@@ -347,7 +350,7 @@ def forward_pty_output(
                     protected_snapshot = current_protected
                 next_status_check = now + TUNNEL_STATUS_CHECK_INTERVAL_SECONDS
 
-            if now >= next_stale_check:
+            if not ready and now >= next_stale_check:
                 cleanup_stale_server_processes(
                     code_bin,
                     env,

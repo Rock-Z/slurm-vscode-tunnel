@@ -200,7 +200,7 @@ class RelayReadinessTests(unittest.TestCase):
         old_status_interval = codeserver_inner.TUNNEL_STATUS_CHECK_INTERVAL_SECONDS
         old_stale_interval = codeserver_inner.STALE_SERVER_CHECK_INTERVAL_SECONDS
         codeserver_inner.TUNNEL_STATUS_CHECK_INTERVAL_SECONDS = 0.05
-        codeserver_inner.STALE_SERVER_CHECK_INTERVAL_SECONDS = 3600
+        codeserver_inner.STALE_SERVER_CHECK_INTERVAL_SECONDS = 0.05
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = pathlib.Path(tmp)
@@ -220,7 +220,11 @@ fi
                 fake_code.chmod(0o755)
                 log = tmp_path / "tunnel.log"
 
-                with mock.patch.object(codeserver_inner, "cancel_previous_job") as cancel:
+                with mock.patch.object(
+                    codeserver_inner, "cancel_previous_job"
+                ) as cancel, mock.patch.object(
+                    codeserver_inner, "cleanup_stale_server_processes"
+                ) as cleanup:
                     rc, respawn = codeserver_inner.forward_pty_output(
                         ["bash", "-lc", "sleep 0.2"],
                         os.environ.copy(),
@@ -233,6 +237,7 @@ fi
                 self.assertEqual(rc, 0)
                 self.assertFalse(respawn)
                 cancel.assert_called_once_with("12345")
+                cleanup.assert_not_called()
         finally:
             codeserver_inner.TUNNEL_STATUS_CHECK_INTERVAL_SECONDS = old_status_interval
             codeserver_inner.STALE_SERVER_CHECK_INTERVAL_SECONDS = old_stale_interval
