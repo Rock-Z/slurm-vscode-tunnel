@@ -83,10 +83,6 @@ def start_sidecars(
             if ready_command:
                 deadline = time.monotonic() + parse_duration(spec["ready_timeout"])
                 while time.monotonic() < deadline:
-                    if process.poll() is not None:
-                        raise RuntimeError(
-                            f"sidecar '{name}' exited with status {process.returncode}; see {log_path}"
-                        )
                     result = subprocess.run(
                         ["bash", "-c", ready_command],
                         stdout=subprocess.DEVNULL,
@@ -94,6 +90,10 @@ def start_sidecars(
                         env=sidecar_env,
                         check=False,
                     )
+                    if process.poll() is not None:
+                        raise RuntimeError(
+                            f"sidecar '{name}' exited with status {process.returncode}; see {log_path}"
+                        )
                     if result.returncode == 0:
                         print(f"[sidecar:{name}] ready")
                         sys.stdout.flush()
@@ -333,6 +333,25 @@ def cleanup_stale_server_processes(
         )
         sys.stdout.flush()
         terminate_pid_process_group(pid, TERMINATE_GRACE_SECONDS)
+
+
+def retire_previous_job(job_id: str, timeout: int) -> None:
+    """Release the previous allocation's services before starting sidecars."""
+    subprocess.run(["scancel", str(job_id)], check=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        jobs = subprocess.run(
+            ["squeue", "--me", "--noheader", "--format=%i"],
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        if str(job_id) not in jobs.stdout.split():
+            print(f"[relay] previous job {job_id} has exited", flush=True)
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"previous job {job_id} did not exit within {timeout}s")
+        time.sleep(1)
 
 
 def cancel_previous_job(job_id: str) -> None:
@@ -605,13 +624,18 @@ def main() -> int:
         print(f"[relay] ready_timeout={args.relay_ready_timeout}s")
     sys.stdout.flush()
 
+    previous_job_id = args.previous_job_id
+    if previous_job_id and cfg["profiles"][args.profile].get("sidecars"):
+        retire_previous_job(previous_job_id, args.relay_ready_timeout)
+        previous_job_id = None
+
     sidecars = start_sidecars(cfg, args.profile, session_dir, env)
     try:
         return supervise_pty_output(
             argv,
             env,
             tunnel_log,
-            args.previous_job_id,
+            previous_job_id,
             args.relay_ready_timeout,
             code_bin,
         )

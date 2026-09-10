@@ -28,6 +28,11 @@ Profiles live in `codeserver.toml`.
 The default `cpu` profile also starts the configured `paseo` sidecar. Sidecars
 run in their own process groups, write separate logs in the session directory,
 must pass their optional readiness check, and are stopped when the tunnel exits.
+Sidecar commands must stay in the foreground. During relay rollover, profiles
+with sidecars cancel the previous job and wait for it to exit before starting
+the new services. This prevents daemons from overlapping on shared ports or
+state directories, at the cost of a brief reconnect. Profiles without sidecars
+retain the overlapping tunnel handoff.
 
 Sidecars can be attached to any profile in `codeserver.toml`:
 
