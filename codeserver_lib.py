@@ -224,6 +224,36 @@ def load_config(config_path: pathlib.Path) -> Dict[str, Any]:
     cfg["code_tunnel_args"] = ensure_list_of_strings(raw["code_tunnel_args"], "code_tunnel_args")
     cfg["env"] = ensure_str_dict(raw.get("env", {}), "env")
 
+    sidecars_raw = ensure_mapping(raw.get("sidecars", {}), "sidecars")
+    sidecars: Dict[str, Dict[str, Any]] = {}
+    for name, sidecar_raw in sidecars_raw.items():
+        if not isinstance(name, str):
+            raise ConfigError("sidecar names must be strings")
+        sidecar = ensure_mapping(sidecar_raw, f"sidecars.{name}")
+        command = ensure_string(sidecar.get("command"), f"sidecars.{name}.command")
+        ready_command = sidecar.get("ready_command")
+        if ready_command is not None:
+            ready_command = ensure_string(ready_command, f"sidecars.{name}.ready_command")
+        ready_capture_command = sidecar.get("ready_capture_command")
+        if ready_capture_command is not None:
+            ready_capture_command = ensure_string(
+                ready_capture_command, f"sidecars.{name}.ready_capture_command"
+            )
+        ready_timeout = sidecar.get("ready_timeout", "2m")
+        sidecars[name] = {
+            "command": command,
+            "log": ensure_string(sidecar.get("log", f"{name}.log"), f"sidecars.{name}.log"),
+            "ready_command": ready_command,
+            "ready_capture_command": ready_capture_command,
+            "ready_output": ensure_string(
+                sidecar.get("ready_output", f"{name}-ready.txt"),
+                f"sidecars.{name}.ready_output",
+            ),
+            "ready_timeout": ensure_string(ready_timeout, f"sidecars.{name}.ready_timeout"),
+            "env": ensure_str_dict(sidecar.get("env", {}), f"sidecars.{name}.env"),
+        }
+    cfg["sidecars"] = sidecars
+
     profiles_raw = ensure_mapping(raw.get("profiles"), "profiles")
     if not profiles_raw:
         raise ConfigError("profiles must not be empty")
@@ -242,6 +272,9 @@ def load_config(config_path: pathlib.Path) -> Dict[str, Any]:
             "pre_commands": ensure_list_of_strings(
                 prof.get("pre_commands", []), f"profiles.{name}.pre_commands"
             ),
+            "sidecars": ensure_list_of_strings(
+                prof.get("sidecars", []), f"profiles.{name}.sidecars"
+            ),
             "env": ensure_str_dict(prof.get("env", {}), f"profiles.{name}.env"),
             "max_time": prof.get("max_time"),
             "default_time": prof.get("default_time"),
@@ -257,6 +290,13 @@ def load_config(config_path: pathlib.Path) -> Dict[str, Any]:
 
     if cfg["default_profile"] not in profiles:
         raise ConfigError("default_profile is not present in profiles")
+
+    for profile_name, profile in profiles.items():
+        for sidecar_name in profile["sidecars"]:
+            if sidecar_name not in sidecars:
+                raise ConfigError(
+                    f"profiles.{profile_name}.sidecars references unknown sidecar '{sidecar_name}'"
+                )
 
     cfg["profiles"] = profiles
     return cfg

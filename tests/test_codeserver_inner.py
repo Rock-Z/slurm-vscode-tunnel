@@ -149,6 +149,42 @@ class RespawnSupervisorTests(unittest.TestCase):
             codeserver_inner.TERMINATE_GRACE_SECONDS = old_grace
 
 
+class SidecarSupervisorTests(unittest.TestCase):
+    def test_starts_waits_for_and_stops_sidecar(self):
+        old_grace = codeserver_inner.TERMINATE_GRACE_SECONDS
+        codeserver_inner.TERMINATE_GRACE_SECONDS = 0.1
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                session_dir = pathlib.Path(tmp)
+                ready = session_dir / "ready"
+                cfg = {
+                    "profiles": {"cpu": {"sidecars": ["example"]}},
+                    "sidecars": {
+                        "example": {
+                            "command": f"echo started; touch {ready}; sleep 60",
+                            "log": "example.log",
+                            "ready_command": f"test -f {ready}",
+                            "ready_timeout": "5s",
+                            "env": {},
+                        }
+                    },
+                }
+
+                processes = codeserver_inner.start_sidecars(
+                    cfg, "cpu", session_dir, os.environ.copy()
+                )
+                self.assertEqual(len(processes), 1)
+                self.assertIsNone(processes[0].process.poll())
+                codeserver_inner.stop_sidecars(processes)
+
+                self.assertIsNotNone(processes[0].process.poll())
+                self.assertIn(
+                    "started", (session_dir / "example.log").read_text(encoding="utf-8")
+                )
+        finally:
+            codeserver_inner.TERMINATE_GRACE_SECONDS = old_grace
+
+
 class RelayReadinessTests(unittest.TestCase):
     def test_parses_connected_code_tunnel_status(self):
         status = codeserver_inner.parse_tunnel_status(

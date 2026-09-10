@@ -25,6 +25,25 @@ Profiles live in `codeserver.toml`.
 - `relay_test`: short `day` partition profile for live relay validation. It uses
   1 CPU, 1 GB RAM, a 2 minute max time, and a 1 minute relay overlap.
 
+The default `cpu` profile also starts the configured `paseo` sidecar. Sidecars
+run in their own process groups, write separate logs in the session directory,
+must pass their optional readiness check, and are stopped when the tunnel exits.
+
+Sidecars can be attached to any profile in `codeserver.toml`:
+
+```toml
+[sidecars.example]
+command = '''exec ~/bin/my-service'''
+log = "example.log"
+ready_command = '''~/bin/my-service status'''
+ready_capture_command = '''~/bin/my-service connection-info --json'''
+ready_output = "example-connection.json"
+ready_timeout = "2m"
+
+[profiles.cpu]
+sidecars = ["example"]
+```
+
 Edit `codeserver.toml` if partitions, resource limits, or environment variables
 need to change.
 

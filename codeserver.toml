@@ -7,8 +7,20 @@ code_tunnel_args = ["tunnel"]
 VSCODE_CLI_USE_FILE_KEYCHAIN = "1"
 VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT = "1"
 
+[sidecars.paseo]
+command = '''exec /gpfs/radev/home/ez275/Apps/npm/bin/paseo daemon start --foreground --home "$HOME/.paseo-slurm"'''
+log = "paseo.log"
+ready_command = '''/gpfs/radev/home/ez275/Apps/npm/bin/paseo daemon status --home "$HOME/.paseo-slurm"'''
+ready_capture_command = '''/gpfs/radev/home/ez275/Apps/npm/bin/paseo daemon pair --json --home "$HOME/.paseo-slurm"'''
+ready_output = "paseo-pairing.json"
+ready_timeout = "2m"
+
+[sidecars.paseo.env]
+PATH = "/gpfs/radev/home/ez275/.local/node24/bin:/gpfs/radev/home/ez275/Apps/npm/bin:/apps/bin:/opt/slurm/current/bin:/usr/local/bin:/usr/bin:/bin"
+
 [profiles.cpu]
 enabled = true
+sidecars = ["paseo"]
 max_time = "24:00:00"
 default_time = "24:00:00"
 relay_overlap = "00:15:00"

@@ -12,10 +12,10 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
 from codeserver_lib import load_config, merged_env
-from codeserver_relay import READY_PATTERNS
+from codeserver_relay import READY_PATTERNS, parse_duration
 
 
 MAX_RESPAWN_RESTARTS = 3
@@ -37,6 +37,103 @@ UPGRADE_HINT_PATTERNS = [
 class TunnelStatus:
     connected: bool
     summary: str
+
+
+@dataclass
+class SidecarProcess:
+    name: str
+    process: subprocess.Popen
+    log_file: TextIO
+
+
+def start_sidecars(
+    cfg: Dict[str, Any], profile_name: str, session_dir: pathlib.Path, env: Dict[str, str]
+) -> List[SidecarProcess]:
+    processes: List[SidecarProcess] = []
+    profile = cfg["profiles"][profile_name]
+    sidecar_env_base = env.copy()
+    sidecar_env_base.update(
+        {
+            "CS_SESSION_DIR": str(session_dir),
+            "CS_PROFILE": profile_name,
+            "CS_JOB_ID": os.environ.get("SLURM_JOB_ID", ""),
+        }
+    )
+    try:
+        for name in profile.get("sidecars", []):
+            spec = cfg["sidecars"][name]
+            sidecar_env = sidecar_env_base.copy()
+            sidecar_env.update(spec.get("env", {}))
+            log_path = session_dir / spec["log"]
+            log_file = log_path.open("a", encoding="utf-8")
+            print(f"[sidecar:{name}] starting; log={log_path}")
+            sys.stdout.flush()
+            process = subprocess.Popen(
+                ["bash", "-c", spec["command"]],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=sidecar_env,
+                start_new_session=True,
+                text=True,
+            )
+            entry = SidecarProcess(name, process, log_file)
+            processes.append(entry)
+
+            ready_command = spec.get("ready_command")
+            if ready_command:
+                deadline = time.monotonic() + parse_duration(spec["ready_timeout"])
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise RuntimeError(
+                            f"sidecar '{name}' exited with status {process.returncode}; see {log_path}"
+                        )
+                    result = subprocess.run(
+                        ["bash", "-c", ready_command],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        env=sidecar_env,
+                        check=False,
+                    )
+                    if result.returncode == 0:
+                        print(f"[sidecar:{name}] ready")
+                        sys.stdout.flush()
+                        capture_command = spec.get("ready_capture_command")
+                        if capture_command:
+                            output_path = session_dir / spec["ready_output"]
+                            with output_path.open("w", encoding="utf-8") as output_file:
+                                capture = subprocess.run(
+                                    ["bash", "-c", capture_command],
+                                    stdout=output_file,
+                                    stderr=subprocess.STDOUT,
+                                    env=sidecar_env,
+                                    check=False,
+                                    text=True,
+                                )
+                            if capture.returncode != 0:
+                                raise RuntimeError(
+                                    f"sidecar '{name}' readiness capture failed; see {output_path}"
+                                )
+                            print(f"[sidecar:{name}] readiness output={output_path}")
+                            sys.stdout.flush()
+                        break
+                    time.sleep(2)
+                else:
+                    raise RuntimeError(
+                        f"sidecar '{name}' was not ready within {spec['ready_timeout']}; see {log_path}"
+                    )
+        return processes
+    except Exception:
+        stop_sidecars(processes)
+        raise
+
+
+def stop_sidecars(processes: List[SidecarProcess]) -> None:
+    for entry in reversed(processes):
+        if entry.process.poll() is None:
+            print(f"[sidecar:{entry.name}] stopping")
+            sys.stdout.flush()
+            terminate_process_group(entry.process, TERMINATE_GRACE_SECONDS)
+        entry.log_file.close()
 
 
 def extract_code_commit(version_text: str) -> Optional[str]:
@@ -508,14 +605,18 @@ def main() -> int:
         print(f"[relay] ready_timeout={args.relay_ready_timeout}s")
     sys.stdout.flush()
 
-    return supervise_pty_output(
-        argv,
-        env,
-        tunnel_log,
-        args.previous_job_id,
-        args.relay_ready_timeout,
-        code_bin,
-    )
+    sidecars = start_sidecars(cfg, args.profile, session_dir, env)
+    try:
+        return supervise_pty_output(
+            argv,
+            env,
+            tunnel_log,
+            args.previous_job_id,
+            args.relay_ready_timeout,
+            code_bin,
+        )
+    finally:
+        stop_sidecars(sidecars)
 
 
 if __name__ == "__main__":
