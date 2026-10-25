@@ -12,6 +12,8 @@ import tarfile
 import tempfile
 import time
 
+from paseo_plugin_deploy import managed_path, stage_plugins
+
 REPO = Path(__file__).resolve().parent
 STORE = REPO / 'runs' / 'paseo-runtime'
 NODE = Path.home() / '.local/node24/bin/node'
@@ -31,6 +33,8 @@ def source_state(home):
         if plugin.get('enabled', True):
             if plugin.get('source') != 'directory':
                 raise RuntimeError('Resolve managed plugins to their installed directory before building')
+            if managed_path(plugin['path']):
+                continue  # Versioned plugin archives are staged independently.
             source = Path(plugin['path']).expanduser().resolve()
             # Source checkouts must stay writable on GPFS, including worktrees
             # whose .git is a file. Published plugins still get local I/O.
@@ -164,6 +168,7 @@ def build_archive(home, state, manifest_path):
 
 def stage(manifest_path=None, home=None):
     job = os.environ['SLURM_JOB_ID']
+    stage_plugins(home or Path.home() / '.paseo-slurm')
     manifest = (json.loads(manifest_path.read_text()) if manifest_path else
                 ensure_current(home or Path.home() / '.paseo-slurm'))
     root = Path(f'/tmp/paseo-runtime-{os.getuid()}-{job}-{manifest["sha256"][:12]}')
