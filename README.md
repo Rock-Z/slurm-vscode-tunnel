@@ -252,3 +252,43 @@ export PATH="$HOME/Apps/slurm-vscode-tunnel:$PATH"
 ```
 
 The current shell setup in `~/.bashrc` includes that path.
+
+### Deploying local Paseo plugins
+
+Keep development checkouts in their existing Paseo projects. Run `npm run deploy`
+on the daemon's Slurm node. The **deploy** workspace script runs it for
+claude-progress and autoresearch; **deploy-slurm-gpus** runs from the ops project.
+The math checkout also has the script but is not a separate registered project.
+
+`paseo_plugin_deploy.py` snapshots current tracked and nonignored untracked files,
+including uncommitted edits; installs locked dependencies locally; and runs the
+normal build and typecheck. npm's `files` list supplies the package contents.
+Production dependencies and generated assets are stored in one immutable archive
+under `~/Apps/data/paseo-plugin-releases/<id>/<sha256>.tar.gz`. Publishing one file
+avoids GPFS metadata traffic from thousands of dependency files.
+
+The daemon loads the extracted code at `/tmp/paseo-plugin-releases-<uid>/<id>/<sha256>`.
+`paseo_runtime.py` recreates missing local copies from the persistent archives
+before every daemon start. Extraction verifies the checksum, uses a private cache
+and lock, and publishes atomically. Changing the temporary cache or losing a node
+does not change the release archive, development checkout, or persistent history.
+Plugin updates do not require rebuilding the main Node/Paseo runtime archive.
+
+Deployment updates that plugin through Paseo's config API and reloads it; failure
+restores its previous source. It retains settings, projects, and old archives for
+rollback and agents already using old CLI assets. No daemon restart is performed.
+Editing the checkout or reloading alone does not update a deployed snapshot.
+Commands inside a Paseo terminal re-enter the same compute node through SSH first
+so publishing cannot accidentally write into inherited runtime overlays.
+
+To prepare without activation:
+
+```bash
+python3 ~/Apps/codeserver/paseo_plugin_deploy.py --source /path/to/plugin --prepare-only
+```
+
+Rollback uses `paseo_plugin_activate.mjs` with the installed CLI package path,
+daemon home, plugin ID, and a previously extracted release path. The archive must
+remain available while that release is referenced. The helper requires a compute
+allocation and a synchronized `package-lock.json`; it never patches Paseo or
+copies mutable histories into `/tmp`.
