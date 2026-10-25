@@ -160,7 +160,8 @@ def main():
         command = ['env', f'SLURM_JOB_ID={os.environ["SLURM_JOB_ID"]}',
             '/usr/bin/python3', str(Path(__file__).resolve()), '--source', str(args.source),
             '--home', str(args.home)] + (['--prepare-only'] if args.prepare_only else [])
-        return subprocess.call(['ssh', '-o', 'BatchMode=yes', socket.gethostname(), shlex.join(command)])
+        return subprocess.call(['ssh', '-F', str(Path.home() / '.ssh/config'), '-o', 'BatchMode=yes',
+                                socket.gethostname(), shlex.join(command)])
     os.umask(0o077)
     store = STORE
     store.mkdir(parents=True, exist_ok=True)
