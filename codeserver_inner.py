@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
@@ -25,6 +26,8 @@ STALE_SERVER_CHECK_INTERVAL_SECONDS = 10
 TUNNEL_STATUS_CHECK_INTERVAL_SECONDS = 5
 TUNNEL_STATUS_TIMEOUT_SECONDS = 10
 UPGRADE_GRACE_SECONDS = 180
+SIDECAR_STOP_GRACE_SECONDS = 20
+SIDECAR_RETRY_DELAYS_SECONDS = [10, 30, 60, 120, 300]
 
 UPGRADE_HINT_PATTERNS = [
     re.compile(r"\bupdat(?:e|ing)\b.*\bCLI\b", re.IGNORECASE),
@@ -127,13 +130,91 @@ def start_sidecars(
         raise
 
 
-def stop_sidecars(processes: List[SidecarProcess]) -> None:
+def stop_sidecars(
+    processes: List[SidecarProcess], grace_seconds: Optional[float] = None
+) -> None:
+    if grace_seconds is None:
+        grace_seconds = TERMINATE_GRACE_SECONDS
     for entry in reversed(processes):
         if entry.process.poll() is None:
             print(f"[sidecar:{entry.name}] stopping")
             sys.stdout.flush()
-            terminate_process_group(entry.process, TERMINATE_GRACE_SECONDS)
+            terminate_process_group(entry.process, grace_seconds)
         entry.log_file.close()
+
+
+class SidecarSupervisor:
+    """Keeps sidecars running in the background without gating the tunnel.
+
+    A sidecar that fails to start or dies later is retried with backoff; it
+    never takes the tunnel down with it.
+    """
+
+    def __init__(
+        self,
+        cfg: Dict[str, Any],
+        profile_name: str,
+        session_dir: pathlib.Path,
+        env: Dict[str, str],
+    ) -> None:
+        self.cfg = cfg
+        self.profile_name = profile_name
+        self.session_dir = session_dir
+        self.env = env
+        self.processes: List[SidecarProcess] = []
+        self.lock = threading.Lock()
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="sidecars", daemon=True)
+
+    def start(self) -> "SidecarSupervisor":
+        if self.cfg["profiles"][self.profile_name].get("sidecars"):
+            self.thread.start()
+        return self
+
+    def _run(self) -> None:
+        failures = 0
+        while not self.stopping.is_set():
+            try:
+                processes = start_sidecars(
+                    self.cfg, self.profile_name, self.session_dir, self.env
+                )
+            except Exception as exc:
+                processes = []
+                print(f"[sidecars] start failed: {exc}", flush=True)
+            else:
+                with self.lock:
+                    self.processes = processes
+                failures = 0
+                while not self.stopping.is_set():
+                    dead = [p for p in processes if p.process.poll() is not None]
+                    if dead:
+                        for p in dead:
+                            print(
+                                f"[sidecar:{p.name}] exited with status "
+                                f"{p.process.returncode}",
+                                flush=True,
+                            )
+                        break
+                    self.stopping.wait(5)
+                with self.lock:
+                    self.processes = []
+                stop_sidecars(processes, SIDECAR_STOP_GRACE_SECONDS)
+            if self.stopping.is_set():
+                return
+            delay = SIDECAR_RETRY_DELAYS_SECONDS[
+                min(failures, len(SIDECAR_RETRY_DELAYS_SECONDS) - 1)
+            ]
+            failures += 1
+            print(f"[sidecars] retrying in {delay}s", flush=True)
+            self.stopping.wait(delay)
+
+    def stop(self) -> None:
+        self.stopping.set()
+        with self.lock:
+            processes, self.processes = self.processes, []
+        stop_sidecars(processes, SIDECAR_STOP_GRACE_SECONDS)
+        if self.thread.is_alive():
+            self.thread.join(timeout=SIDECAR_STOP_GRACE_SECONDS + 5)
 
 
 def extract_code_commit(version_text: str) -> Optional[str]:
@@ -589,7 +670,13 @@ def main() -> int:
     ap.add_argument("--previous-job-id")
     ap.add_argument("--relay-ready-timeout", type=int, default=300)
     ap.add_argument("--test-command")
+    ap.add_argument("--app-paths-loaded", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    if not args.app_paths_loaded:
+        wrapper = pathlib.Path(__file__).resolve().with_name("with_app_paths.sh")
+        os.execv(str(wrapper), [str(wrapper), sys.executable, str(pathlib.Path(__file__).resolve()),
+                               "--app-paths-loaded", *sys.argv[1:]])
 
     cfg = load_config(pathlib.Path(args.config))
     session_dir = pathlib.Path(args.session_dir)
@@ -629,7 +716,14 @@ def main() -> int:
         retire_previous_job(previous_job_id, args.relay_ready_timeout)
         previous_job_id = None
 
-    sidecars = start_sidecars(cfg, args.profile, session_dir, env)
+    # scancel only signals the batch process; turn SIGTERM into a normal exit
+    # so the finally block below shuts sidecars down cleanly before SIGKILL.
+    def handle_sigterm(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    sidecars = SidecarSupervisor(cfg, args.profile, session_dir, env).start()
     try:
         return supervise_pty_output(
             argv,
@@ -640,7 +734,7 @@ def main() -> int:
             code_bin,
         )
     finally:
-        stop_sidecars(sidecars)
+        sidecars.stop()
 
 
 if __name__ == "__main__":

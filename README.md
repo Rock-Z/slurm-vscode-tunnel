@@ -19,7 +19,8 @@ Profiles
 Profiles live in `codeserver.toml`.
 
 - `cpu`: default profile, submits to the `day` partition with 4 CPUs, 32 GB RAM,
-  and a 24 hour limit.
+  and a 24 hour limit. CPU relay chains make each successor eligible every
+  20 hours, providing a nominal 4 hour overlap for queue delays.
 - `gpu`: submits to the `gpu_devel` partition with 1 GPU, 4 CPUs, 32 GB RAM,
   and a 6 hour limit.
 - `relay_test`: short `day` partition profile for live relay validation. It uses
@@ -28,11 +29,129 @@ Profiles live in `codeserver.toml`.
 The default `cpu` profile also starts the configured `paseo` sidecar. Sidecars
 run in their own process groups, write separate logs in the session directory,
 must pass their optional readiness check, and are stopped when the tunnel exits.
-Sidecar commands must stay in the foreground. During relay rollover, profiles
+Sidecar commands must stay in the foreground. `paseo_runtime.py run` stages the
+packaged application and Node binary into a private job-local `/tmp` directory,
+then executes `paseo daemon run --home "$HOME/.paseo-slurm"` there. Persistent
+settings, agent state, credentials, and workspaces retain their existing paths.
+`paseo_ready.py` checks the supervisor PID, hostname and Slurm cgroup, then the
+loopback health endpoint; it does not load another copy of the Node CLI. During relay rollover, profiles
 with sidecars cancel the previous job and wait for it to exit before starting
 the new services. This prevents daemons from overlapping on shared ports or
 state directories, at the cost of a brief reconnect. Profiles without sidecars
 retain the overlapping tunnel handoff.
+
+The CPU profile also starts `paseo_diagnostics` before Paseo. It samples the
+actual daemon every 0.5 seconds (CPU ticks, scheduler delay, RSS, kernel wait,
+current syscall and blocked I/O file descriptor) and checks loopback HTTP health
+once per second with a two-second timeout. A Node preload hook, active only in
+`Paseo Daemon`, logs synchronous filesystem and process-launch calls taking at
+least 100 ms, with duration and JavaScript stack. It also records timer gaps.
+This diagnoses stalls; it does not fix them or trace asynchronous Git children.
+
+Diagnostics spool privately under `/tmp/paseo-diagnostics-$UID-$SLURM_JOB_ID`.
+A separate thread exports new records every ten seconds to
+`<session_dir>/paseo-diagnostics/events.jsonl`; existing `paseo.log` supplies
+request timings and relay events for correlation. Samples and exported events
+are each capped at 64 MiB, and slow-operation logs at approximately 6 MiB.
+Logs contain paths and stack locations, never file contents or command arguments.
+Recent node-local records can be lost on abrupt node/job termination. A GPFS
+export failure is recorded locally. Shutdown stops Paseo before the sampler so
+it can export the final records. The next CPU job loads the diagnostics; no
+running daemon is automatically restarted. Remove `paseo_diagnostics` from the
+profile and unset `PASEO_DIAGNOSTIC_DIR` in Paseo's command to disable them.
+
+The configured `python_bin = "/usr/bin/python3"` also keeps the job bootstrap
+on the node-local Python installation instead of inheriting a GPFS module
+interpreter from the submitting shell.
+
+App storage exports have one source: the self-contained block between exact
+`# app-storage:begin` and `# app-storage:end` lines in `~/.bashrc`.
+`with_app_paths.sh COMMAND [ARG ...]` evaluates only that trusted block, then
+executes the supplied command. Missing or malformed markers abort the launch.
+It never sources the rest of the interactive configuration.
+
+Coding agent providers need no command override: the Paseo daemon already runs
+under the wrapper, so every agent it launches inherits the storage exports.
+Edits to the block reach agents after the next daemon restart. Do not route
+`agents.providers.codex.command` through a wrapper. Paseo probes only
+`command[0] --version` with a 5 s timeout and caches a failure, and a slow
+wrapper chain then hides Auto-review until the daemon restarts.
+
+New batch scripts invoke the wrapper before `codeserver_inner.py`; older batch
+scripts and direct launches enter it through the inner script once. Tunnel,
+sidecars, readiness checks and descendants inherit the resulting exports.
+The Paseo runtime then prepends its job-local `/tmp` tool directory to `PATH`.
+There is no separate hardcoded Paseo PATH. Node and npm installation roots are
+resolved before packaging and mounting, so the `~/Apps` and `~/.local/node24`
+compatibility symlinks can point to relocated application storage without
+putting unsafe absolute root links in the archive. Internal package links still
+undergo the existing safe extraction checks.
+
+Normal `run` and `stage` launches check the persistent installation and rebuild
+the runtime archive automatically inside the new compute allocation. Ordinary
+`npm install -g` updates outside the service namespace need no special wrapper.
+To force a rebuild (for example, after editing a nested plugin source file):
+
+```bash
+/usr/bin/python3 ~/Apps/codeserver/paseo_runtime.py build
+```
+
+The build includes the Node installation, the global npm installation (including
+Paseo and Codex), enabled plugin directories with their dependencies, installed
+Claude/uv tools found on PATH, and the diagnostic hook. It rejects external package symlinks and publishes a
+SHA-256-named archive plus `runs/paseo-runtime/current.json` atomically. Each job
+copies the archive sequentially, verifies its checksum, and unpacks into
+`/tmp/paseo-runtime-$UID-$SLURM_JOB_ID-<hash>`. Retries in the same job reuse that
+copy. A shared build lock serializes concurrent startups and rechecks freshness
+after waiting, so they publish one complete archive. Failed builds and detected
+source changes during packaging/publication/staging abort the launch instead of
+using an older version. Archives without freshness metadata rebuild once.
+The Paseo sidecar allows 15 minutes for rebuilding, staging and daemon readiness;
+the relay timeout separately bounds retirement of the previous allocation.
+Application updates in a temporary runtime are not persistent: update the
+shared installation outside the service namespace for future jobs. The generated
+archives are ignored by Git. Startup logs record the version, hash, and staging
+time. The temporary runtime contains no agent state and can be discarded after
+the job; older archives remain available for reproducibility.
+
+The runtime uses `bwrap` private bind mounts: each packaged dependency appears at
+its original absolute path inside Paseo and its children, backed by the job-local
+copy. Persistent Paseo home, settings, credentials, agent histories, projects,
+and session logs keep their original GPFS paths; only the configured plugin
+source subdirectories and installed tools are overlaid. Outside that process
+tree, the shared installations are unchanged. The launcher refuses automatic or
+manual builds from an overlaid namespace. In-app terminals in such a daemon
+can see job-local dependencies at the usual global paths: `npm install -g` there
+may mutate the running job-local copy, without updating the persistent installation.
+Use an SSH shell outside that process tree for persistent updates. Slurm batch
+bootstrap starts outside the old daemon namespace, even when submitted from it.
+
+Freshness checks inspect shallow metadata (inode, ctime, mtime, size and mode) for
+installation roots, npm package roots including scopes, package manifests, Node,
+resolved command executables, enabled plugin roots and their immediate entries,
+and the diagnostic hook. They detect ordinary npm updates and same-version
+reinstalls without walking recursive GPFS dependency trees on every launch.
+Arbitrary edits to deeply nested package/plugin files can escape these checks;
+force `build` after those edits. Package updaters do not share the build lock:
+before/after checks reject detected concurrent changes, but cannot guarantee a
+transactional snapshot during an update or eliminate a change after the final
+check. Finish updates before launching jobs. Already-staged directories are
+never refreshed by archive publication. Candidate archives remain explicitly
+pinned and bypass the automatic freshness check.
+
+For rollout validation, `build --candidate` writes `candidate.json` without
+changing `current.json`, and `run --candidate` uses it. In a compute allocation,
+`python3 -m unittest discover -s tests -p test_paseo_runtime.py -v` checks that
+all dependency mounts use the local device, persistent writes are visible outside
+the namespace, and both configured plugins reach `running`. Successful evidence
+is written to `runs/paseo-runtime/candidate-validation.json` before activation.
+
+The September 30 production run showed that `q5m-math` compilation still
+synchronously read MathJax dependencies from GPFS through `checkSourceImports`
+and `createPluginImportReader.read`. Plugin startup precedes relay creation;
+the application-only bundle did not cover plugin dependencies. The expanded
+bundle mounts those dependency trees locally. Historical observations remain in
+`runs/paseo-local-benchmark-20260930/production.json`.
 
 Sidecars can be attached to any profile in `codeserver.toml`:
 
@@ -220,10 +339,15 @@ Longer requests create a relay chain under `runs/logs/<chain-id>/` with one
 subdirectory per segment and a top-level `chain.json`.
 
 Future segments are submitted immediately with Slurm `--begin=now+...` offsets.
-When a new segment starts, it waits for tunnel readiness before canceling the
-previous segment. Readiness is detected from tunnel output; the deterministic
-test path uses `READY`. If readiness is not detected within
-`relay_ready_timeout`, the previous job is left alive.
+For profiles without sidecars, a new segment waits for tunnel readiness before
+canceling the previous segment. Production readiness comes from `code tunnel
+status`; the deterministic test path uses `READY`. If readiness is not detected
+within `relay_ready_timeout`, the previous job is left alive.
+
+Profiles with sidecars instead retire the previous allocation first, as described
+above, then start and check the sidecars before launching the tunnel. A startup
+failure therefore leaves a gap until another segment starts; the nominal overlap
+is queue-delay headroom, not a fallback after retirement.
 
 Live relay test pattern:
 
@@ -252,6 +376,7 @@ export PATH="$HOME/Apps/slurm-vscode-tunnel:$PATH"
 ```
 
 The current shell setup in `~/.bashrc` includes that path.
+
 
 ### Deploying local Paseo plugins
 

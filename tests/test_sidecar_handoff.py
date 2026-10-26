@@ -29,7 +29,7 @@ class SidecarHandoffTests(unittest.TestCase):
             with self.subTest(sidecars=sidecars), tempfile.TemporaryDirectory() as tmp:
                 events = []
                 cfg = {"profiles": {"cpu": {"sidecars": sidecars}}}
-                argv = ["cs", "--config", "unused", "--profile", "cpu",
+                argv = ["cs", "--app-paths-loaded", "--config", "unused", "--profile", "cpu",
                         "--session-dir", tmp, "--run-log", tmp + "/run.log",
                         "--tunnel-log", tmp + "/tunnel.log", "--previous-job-id", "123",
                         "--test-command", "true"]
@@ -39,8 +39,8 @@ class SidecarHandoffTests(unittest.TestCase):
                     mock.patch.object(inner, "merged_env", return_value={}),
                     mock.patch.object(inner, "retire_previous_job",
                                       side_effect=lambda *a: events.append("retire")),
-                    mock.patch.object(inner, "start_sidecars",
-                                      side_effect=lambda *a: events.append("start") or []),
+                    mock.patch.object(inner.SidecarSupervisor, "start", autospec=True,
+                                      side_effect=lambda self: events.append("start") or self),
                     mock.patch.object(inner, "supervise_pty_output", return_value=0) as supervise,
                 ):
                     self.assertEqual(inner.main(), 0)
@@ -62,3 +62,27 @@ class SidecarHandoffTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "exited with status 1"):
                 inner.start_sidecars(cfg, "cpu", pathlib.Path(tmp), os.environ.copy())
+
+
+class SidecarSupervisorRetryTests(unittest.TestCase):
+    def test_failed_start_is_retried_without_raising(self):
+        cfg = {"profiles": {"cpu": {"sidecars": ["example"]}}}
+        calls = []
+
+        def fake_start(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("not ready")
+            return []
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(inner, "start_sidecars", side_effect=fake_start),
+            mock.patch.object(inner, "SIDECAR_RETRY_DELAYS_SECONDS", [0.05]),
+        ):
+            supervisor = inner.SidecarSupervisor(cfg, "cpu", pathlib.Path(tmp), {}).start()
+            deadline = inner.time.monotonic() + 5
+            while len(calls) < 2 and inner.time.monotonic() < deadline:
+                inner.time.sleep(0.05)
+            supervisor.stop()
+        self.assertGreaterEqual(len(calls), 2)

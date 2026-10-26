@@ -221,6 +221,7 @@ def load_config(config_path: pathlib.Path) -> Dict[str, Any]:
     cfg["root_dir"] = ensure_string(raw["root_dir"], "root_dir")
     cfg["default_profile"] = ensure_string(raw["default_profile"], "default_profile")
     cfg["code_bin"] = ensure_string(raw["code_bin"], "code_bin")
+    cfg["python_bin"] = ensure_string(raw.get("python_bin", sys.executable), "python_bin")
     cfg["code_tunnel_args"] = ensure_list_of_strings(raw["code_tunnel_args"], "code_tunnel_args")
     cfg["env"] = ensure_str_dict(raw.get("env", {}), "env")
 

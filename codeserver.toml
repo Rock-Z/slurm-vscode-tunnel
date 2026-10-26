@@ -1,36 +1,43 @@
 root_dir = "~/Apps/slurm-vscode-tunnel/runs"
 default_profile = "cpu"
 code_bin = "code"
+python_bin = "/usr/bin/python3"
 code_tunnel_args = ["tunnel"]
 
 [env]
 VSCODE_CLI_USE_FILE_KEYCHAIN = "1"
 VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT = "1"
 
-[sidecars.paseo]
-command = '''exec /gpfs/radev/home/ez275/Apps/npm/bin/paseo daemon start --foreground --home "$HOME/.paseo-slurm"'''
-log = "paseo.log"
-ready_command = '''/gpfs/radev/home/ez275/Apps/npm/bin/paseo daemon status --home "$HOME/.paseo-slurm"'''
-ready_capture_command = '''/gpfs/radev/home/ez275/Apps/npm/bin/paseo daemon pair --json --home "$HOME/.paseo-slurm"'''
-ready_output = "paseo-pairing.json"
-ready_timeout = "2m"
+[sidecars.paseo_diagnostics]
+command = '''
+export PASEO_DIAGNOSTIC_DIR="/tmp/paseo-diagnostics-$UID-${SLURM_JOB_ID:?}"
+exec /usr/bin/python3 /gpfs/radev/home/ez275/Apps/codeserver/paseo_diagnostics.py
+'''
+log = "paseo-diagnostics.log"
 
-[sidecars.paseo.env]
-PATH = "/gpfs/radev/home/ez275/.local/node24/bin:/gpfs/radev/home/ez275/Apps/npm/bin:/apps/bin:/opt/slurm/current/bin:/usr/local/bin:/usr/bin:/bin"
+[sidecars.paseo]
+command = '''
+export PASEO_DIAGNOSTIC_DIR="/tmp/paseo-diagnostics-$UID-${SLURM_JOB_ID:?}"
+exec /usr/bin/python3 /gpfs/radev/home/ez275/Apps/codeserver/paseo_runtime.py run --home "$HOME/.paseo-slurm"
+'''
+log = "paseo.log"
+ready_command = '''exec /usr/bin/python3 /gpfs/radev/home/ez275/Apps/codeserver/paseo_ready.py "$HOME/.paseo-slurm"'''
+# Allow packaging on GPFS as well as cached staging and daemon startup.
+ready_timeout = "15m"
 
 [profiles.cpu]
 enabled = true
-sidecars = ["paseo"]
-max_time = "24:00:00"
-default_time = "24:00:00"
-relay_overlap = "00:15:00"
+sidecars = ["paseo_diagnostics", "paseo"]
+max_time = "168:00:00"
+default_time = "168:00:00"
+relay_overlap = "04:00:00"
 relay_ready_timeout = "00:05:00"
 relay_enabled = true
 sbatch_args = [
   "--nodes=1",
   "--cpus-per-task=4",
   "--mem=32G",
-  "--partition=day",
+  "--partition=week",
   "--job-name=codeserver-cpu",
 ]
 pre_commands = []

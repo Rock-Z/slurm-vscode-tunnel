@@ -2,7 +2,6 @@
 import argparse
 import pathlib
 import shlex
-import shutil
 import subprocess
 import tomllib
 from typing import Any, Dict, List, Optional
@@ -68,6 +67,7 @@ def write_batch_script(
     if test_command:
         extra_args += f" \\\n  --test-command {shlex.quote(test_command)}"
 
+    wrapper = inner_py.with_name("with_app_paths.sh")
     body = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -78,7 +78,7 @@ echo "[batch] session_dir={shlex.quote(str(session_dir))}"
 echo "[batch] run_log={shlex.quote(str(run_log))}"
 echo "[batch] tunnel_log={shlex.quote(str(tunnel_log))}"
 
-{preamble}exec {shlex.quote(python_bin)} {shlex.quote(str(inner_py))} \\
+{preamble}exec {shlex.quote(str(wrapper))} {shlex.quote(python_bin)} {shlex.quote(str(inner_py))} --app-paths-loaded \\
   --config {shlex.quote(str(config_path))} \\
   --profile {shlex.quote(profile_name)} \\
   --session-dir {shlex.quote(str(session_dir))} \\
@@ -148,7 +148,7 @@ def submit_single(
     batch_script = session_dir / "batch.sh"
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    python_bin = shutil.which("python3") or "python3"
+    python_bin = cfg["python_bin"]
     inner_py = pathlib.Path(__file__).resolve().parent / "codeserver_inner.py"
     ready_timeout = parse_duration(str(profile.get("relay_ready_timeout") or "5m"))
     write_batch_script(
@@ -216,7 +216,7 @@ def submit_chain(
     chain_dir.mkdir(parents=True, exist_ok=True)
     chain_json = chain_dir / "chain.json"
 
-    python_bin = shutil.which("python3") or "python3"
+    python_bin = cfg["python_bin"]
     inner_py = pathlib.Path(__file__).resolve().parent / "codeserver_inner.py"
     ready_timeout = parse_duration(str(profile.get("relay_ready_timeout") or "5m"))
 
