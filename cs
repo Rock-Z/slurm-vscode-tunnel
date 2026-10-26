@@ -7,6 +7,11 @@ import re
 import shutil
 import subprocess
 import sys
+
+if sys.version_info < (3, 11):
+    # tomllib needs 3.11; e.g. Bouchet's /usr/bin/python3 is 3.9.
+    os.execvp("python3.11", ["python3.11", *sys.argv])
+
 import tomllib
 from typing import Any, Dict, List, Optional
 
