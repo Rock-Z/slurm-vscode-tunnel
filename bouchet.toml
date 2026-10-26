@@ -1,0 +1,68 @@
+# Bouchet config: select with CODESERVER_CONFIG=~/Apps/slurm-vscode-tunnel/bouchet.toml.
+# Paseo runs straight from the npm install; no runtime archive, bwrap or diagnostics.
+root_dir = "~/Apps/slurm-vscode-tunnel/runs"
+default_profile = "cpu"
+code_bin = "/home/ez275/Apps/vscode-cli/code"
+# /usr/bin/python3 is 3.9 on Bouchet; tomllib needs 3.11.
+python_bin = "/usr/bin/python3.11"
+code_tunnel_args = ["tunnel"]
+
+[env]
+VSCODE_CLI_USE_FILE_KEYCHAIN = "1"
+VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT = "1"
+
+[sidecars.paseo]
+command = '''exec "$HOME/.local/npm-global/bin/paseo" daemon run --home "$HOME/.paseo-slurm"'''
+log = "paseo.log"
+ready_command = '''exec /usr/bin/python3.11 "$HOME/Apps/slurm-vscode-tunnel/paseo_ready.py" "$HOME/.paseo-slurm"'''
+ready_timeout = "5m"
+
+[profiles.cpu]
+enabled = true
+sidecars = ["paseo"]
+max_time = "168:00:00"
+default_time = "168:00:00"
+relay_overlap = "04:00:00"
+relay_ready_timeout = "00:05:00"
+relay_enabled = true
+sbatch_args = [
+  "--nodes=1",
+  "--cpus-per-task=4",
+  "--mem=32G",
+  "--partition=agent",
+  "--job-name=codeserver-cpu",
+]
+pre_commands = []
+
+[profiles.gpu]
+enabled = true
+max_time = "06:00:00"
+default_time = "06:00:00"
+relay_overlap = "00:10:00"
+relay_ready_timeout = "00:05:00"
+relay_enabled = true
+sbatch_args = [
+  "--nodes=1",
+  "--cpus-per-task=4",
+  "--mem=32G",
+  "--partition=gpu_devel",
+  "--gpus=1",
+  "--job-name=codeserver-gpu",
+]
+pre_commands = []
+
+[profiles.relay_test]
+enabled = true
+max_time = "00:02:00"
+default_time = "00:02:00"
+relay_overlap = "00:01:00"
+relay_ready_timeout = "00:01:00"
+relay_enabled = true
+sbatch_args = [
+  "--nodes=1",
+  "--cpus-per-task=1",
+  "--mem=1G",
+  "--partition=day",
+  "--job-name=codeserver-relay-test",
+]
+pre_commands = []

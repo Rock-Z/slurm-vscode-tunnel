@@ -32,7 +32,7 @@ def script_dir() -> pathlib.Path:
 
 
 def default_config_path() -> pathlib.Path:
-    return script_dir() / "codeserver.toml"
+    return pathlib.Path(os.environ.get("CODESERVER_CONFIG") or script_dir() / "codeserver.toml").expanduser()
 
 
 def load_text(path: pathlib.Path) -> str:
