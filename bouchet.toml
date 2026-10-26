@@ -29,7 +29,7 @@ sbatch_args = [
   "--nodes=1",
   "--cpus-per-task=4",
   "--mem=32G",
-  "--partition=agent",
+  "--partition=week",
   "--job-name=codeserver-cpu",
 ]
 pre_commands = []
